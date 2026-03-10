@@ -10,8 +10,13 @@ PR-AF accepts reviews through three input modes, each with different context ric
 
 ### Mode 1: GitHub PR URL (Full Context)
 
-```bash
-pr-af review https://github.com/owner/repo/pull/123
+```json
+POST /reasoner/pr-af/review
+{
+  "pr_url": "https://github.com/owner/repo/pull/123",
+  "depth": "auto",
+  "max_cost_usd": 2.00
+}
 ```
 
 **What's fetched via GitHub API:**
@@ -33,10 +38,13 @@ pr-af review https://github.com/owner/repo/pull/123
 
 ### Mode 2: Diff Only (Lightweight)
 
-```bash
-pr-af review --diff ./changes.diff
-# or piped
-git diff main...HEAD | pr-af review --diff -
+```json
+POST /reasoner/pr-af/review
+{
+  "diff": "--- a/file.py\n+++ b/file.py\n@@ -1,3 +1,4 @@\n...",
+  "depth": "quick",
+  "max_cost_usd": 0.50
+}
 ```
 
 **What's available:**
@@ -54,8 +62,15 @@ git diff main...HEAD | pr-af review --diff -
 
 ### Mode 3: Local Repo + Branch
 
-```bash
-pr-af review --repo /path/to/repo --base main --head feature-branch
+```json
+POST /reasoner/pr-af/review
+{
+  "repo_path": "/path/to/repo",
+  "base_ref": "main",
+  "head_ref": "feature-branch",
+  "depth": "standard",
+  "max_cost_usd": 1.50
+}
 ```
 
 **What's available:**
@@ -142,14 +157,16 @@ For organizations that want a persistent bot reviewer:
 ### Generic CI/CD (GitLab, Bitbucket, Jenkins)
 
 ```bash
-# Install
-pip install pr-af
-
-# Review with structured output
-pr-af review \
-  --diff "$(git diff $CI_MERGE_REQUEST_DIFF_BASE_SHA...$CI_COMMIT_SHA)" \
-  --output json \
-  --output-file review.json
+# Call the API endpoint with curl or httpx
+curl -X POST https://agentfield.example.com/reasoner/pr-af/review \
+  -H "Authorization: Bearer $AGENTFIELD_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "diff": "'"$(git diff $CI_MERGE_REQUEST_DIFF_BASE_SHA...$CI_COMMIT_SHA)"'",
+    "depth": "standard",
+    "max_cost_usd": 2.00
+  }' \
+  -o review.json
 
 # Post-process the JSON output with your platform's comment API
 ```
@@ -350,68 +367,6 @@ comments:
 | `PR_AF_CONFIG` | No | Path to config file (default: `.pr-af.yml`) |
 | `PR_AF_DEPTH` | No | Override review depth |
 | `PR_AF_MAX_COST` | No | Override max cost |
-
----
-
-## CLI Reference
-
-```bash
-# Review a GitHub PR
-pr-af review https://github.com/owner/repo/pull/123
-
-# Review with options
-pr-af review https://github.com/owner/repo/pull/123 \
-  --depth deep \
-  --max-cost 5.00 \
-  --output json \
-  --output-file review.json \
-  --clone shallow
-
-# Review a local diff
-pr-af review --diff ./changes.diff --output markdown
-
-# Review local branches
-pr-af review --repo . --base main --head feature-branch
-
-# Start as a server (webhook mode)
-pr-af serve --port 8080
-
-# Dry run (no GitHub posting)
-pr-af review https://github.com/owner/repo/pull/123 --dry-run
-
-# Cost estimate (runs intake + anatomy only)
-pr-af estimate https://github.com/owner/repo/pull/123
-```
-
----
-
-## Python SDK
-
-```python
-from pr_af import ReviewClient
-
-client = ReviewClient(
-    agentfield_api_key="...",
-    github_token="...",
-)
-
-# Review a PR
-result = await client.review(
-    pr_url="https://github.com/owner/repo/pull/123",
-    depth="standard",
-    max_cost_usd=2.00,
-)
-
-# Access findings
-for finding in result.findings:
-    print(f"{finding.severity}: {finding.title} at {finding.file_path}:{finding.line_start}")
-
-# Post to GitHub (if not done automatically)
-await client.post_review(result)
-
-# Get cost breakdown
-print(result.metadata.budget)  # {"spent_usd": 1.23, "cap_usd": 2.00}
-```
 
 ---
 
