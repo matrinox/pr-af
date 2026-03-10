@@ -1,0 +1,51 @@
+services:
+  agentfield:
+    image: ghcr.io/agent-field/agentfield:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - AF_MODE=dev
+      - AGENTFIELD_HTTP_ADDR=0.0.0.0:8080
+      - AGENTFIELD_STORAGE_MODE=local
+    volumes:
+      - agentfield-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  pr-af:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - AGENTFIELD_SERVER=http://agentfield:8080
+      - AGENTFIELD_API_KEY=${AGENTFIELD_API_KEY:-}
+      - AGENT_CALLBACK_URL=http://pr-af:8004
+      - HARNESS_PROVIDER=opencode
+      - HARNESS_MODEL=${HARNESS_MODEL:-openrouter/moonshotai/kimi-k2.5}
+      - AI_MODEL=${AI_MODEL:-openrouter/moonshotai/kimi-k2.5}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GH_TOKEN=${GH_TOKEN:-}
+    volumes:
+      - pr-af-workspaces:/workspaces
+    depends_on:
+      agentfield:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  agentfield-data:
+  pr-af-workspaces:
