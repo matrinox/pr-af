@@ -14,12 +14,12 @@ from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Phase 1 → Phase 3: Intake Result
-# Format: Structured JSON (drives routing in planner)
+# Format: Hybrid (structured fields for routing + pr_summary string for LLM context)
 # ---------------------------------------------------------------------------
 
 
 class IntakeResult(BaseModel):
-    """Phase 1 output. Structured JSON — drives routing decisions downstream."""
+    """Phase 1 output. Hybrid — structured fields for routing, pr_summary string for LLM context."""
 
     pr_type: str  # feature | bugfix | refactor | docs | infra | mixed
     complexity: str  # trivial | standard | complex | massive
