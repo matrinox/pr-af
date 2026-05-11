@@ -29,9 +29,8 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     AGENTFIELD_SERVER=http://agentfield:8080 \
-    HARNESS_PROVIDER=opencode \
-    HARNESS_MODEL=openrouter/moonshotai/kimi-k2.5 \
-    AI_MODEL=openrouter/moonshotai/kimi-k2.5 \
+    PR_AF_PROVIDER=opencode \
+    PR_AF_MODEL=openrouter/moonshotai/kimi-k2.5 \
     PORT=8004 \
     HOME=/home/praf \
     PYTHONPATH=/app/src \

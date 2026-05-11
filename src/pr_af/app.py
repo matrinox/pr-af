@@ -24,7 +24,7 @@ _project_root = Path(__file__).resolve().parents[2]
 load_dotenv(_project_root / ".env")
 
 _ai_config = AIIntegrationConfig.from_env()
-NODE_ID = os.getenv("PR_AF", "pr-af")
+NODE_ID = os.getenv("NODE_ID", "pr-af")
 HarnessConfig = _agentfield.HarnessConfig
 
 app = Agent(
@@ -95,7 +95,7 @@ def _resolve_repo(repo_path: str | None, pr_url: str | None) -> str:
         os.makedirs(workdir, exist_ok=True)
 
         clone_url = target
-        gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+        gh_token = os.getenv("GH_TOKEN", "")
         if gh_token and clone_url.startswith("https://github.com/"):
             clone_url = clone_url.replace("https://github.com/", f"https://{gh_token}@github.com/")
 
