@@ -158,7 +158,7 @@ There are excellent AI code review tools on the market. PR-AF is not designed to
 
 ```bash
 git clone https://github.com/Agent-Field/pr-af.git && cd pr-af
-cp .env.example .env          # Add OPENROUTER_API_KEY, GITHUB_TOKEN
+cp .env.example .env          # Add OPENROUTER_API_KEY, GH_TOKEN
 docker compose up --build
 ```
 

@@ -238,17 +238,12 @@ class ReviewConfig(BaseModel):
 
 
 class AIIntegrationConfig(BaseModel):
-    provider: str = Field(
-        default_factory=lambda: os.getenv("PR_AF_PROVIDER", os.getenv("HARNESS_PROVIDER", "opencode"))
-    )
+    provider: str = Field(default_factory=lambda: os.getenv("PR_AF_PROVIDER", "opencode"))
     harness_model: str = Field(
-        default_factory=lambda: os.getenv("PR_AF_MODEL", os.getenv("HARNESS_MODEL", "minimax/minimax-m2.5"))
+        default_factory=lambda: os.getenv("PR_AF_MODEL", "minimax/minimax-m2.5")
     )
     ai_model: str = Field(
-        default_factory=lambda: os.getenv(
-            "PR_AF_AI_MODEL",
-            os.getenv("AI_MODEL", os.getenv("PR_AF_MODEL", "minimax/minimax-m2.5")),
-        )
+        default_factory=lambda: os.getenv("PR_AF_MODEL", "minimax/minimax-m2.5")
     )
     max_turns: int = Field(default_factory=lambda: int(os.getenv("PR_AF_MAX_TURNS", "50")))
     max_retries: int = Field(default_factory=lambda: int(os.getenv("PR_AF_AI_MAX_RETRIES", "3")))
@@ -257,9 +252,7 @@ class AIIntegrationConfig(BaseModel):
     )
     max_backoff_seconds: float = Field(default_factory=lambda: float(os.getenv("PR_AF_AI_MAX_BACKOFF_SECONDS", "8.0")))
     opencode_bin: str = Field(default_factory=lambda: os.getenv("PR_AF_OPENCODE_BIN", "opencode"))
-    opencode_server: str | None = Field(
-        default_factory=lambda: os.getenv("PR_AF_OPENCODE_SERVER", os.getenv("OPENCODE_SERVER"))
-    )
+    opencode_server: str | None = Field(default_factory=lambda: os.getenv("PR_AF_OPENCODE_SERVER"))
 
     @classmethod
     def from_env(cls) -> AIIntegrationConfig:
@@ -271,7 +264,6 @@ class AIIntegrationConfig(BaseModel):
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "GOOGLE_API_KEY",
-            "GITHUB_TOKEN",
             "GH_TOKEN",
         )
         env: dict[str, str] = {key: value for key in env_keys if (value := os.getenv(key))}
