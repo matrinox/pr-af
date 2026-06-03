@@ -475,7 +475,12 @@ async def planning_phase(intake: dict, anatomy: dict, depth: str = "standard", h
 # ---------------------------------------------------------------------------
 
 
-def _build_meta_context(intake: dict, anatomy: dict, diff_patches: dict[str, str] | None = None) -> str:
+def _build_meta_context(
+    intake: dict,
+    anatomy: dict,
+    diff_patches: dict[str, str] | None = None,
+    reviewer_feedback: str = "",
+) -> str:
     """Build shared context string for all meta-selectors."""
     import json as _json
 
@@ -508,6 +513,13 @@ def _build_meta_context(intake: dict, anatomy: dict, diff_patches: dict[str, str
     if diff_patches:
         payload["diff_patches"] = dict(list(diff_patches.items())[:15])
 
+    if reviewer_feedback:
+        # Human reviewer guidance from a prior HITL round. The reviewer saw the
+        # last set of findings and asked for changes (e.g. "too aggressive, tone
+        # it down", "drop nitpicks", "focus on X"). Let it shape which
+        # dimensions you generate this round.
+        payload["human_reviewer_guidance"] = reviewer_feedback
+
     return _json.dumps(payload, default=str)
 
 
@@ -518,13 +530,14 @@ async def meta_semantic(
     depth: str = "standard",
     repo_path: str = "",
     diff_patches: dict[str, str] | None = None,
+    reviewer_feedback: str = "",
 ) -> dict:
     """Semantic lens: What does this code DO differently?
 
     Focuses on logic, behavior, API contracts, concurrency, security, error handling.
     Asks: "If I run the old code and the new code side by side, where do they diverge?"
     """
-    context = _build_meta_context(intake, anatomy, diff_patches)
+    context = _build_meta_context(intake, anatomy, diff_patches, reviewer_feedback)
     context_ref = f"{context}"
     if repo_path and len(context) > 8000:
         file_path = _write_context_file(context, "meta_semantic_context.json", repo_path)
@@ -597,13 +610,14 @@ async def meta_mechanical(
     depth: str = "standard",
     repo_path: str = "",
     diff_patches: dict[str, str] | None = None,
+    reviewer_feedback: str = "",
 ) -> dict:
     """Mechanical lens: Does this code WORK correctly at the language level?
 
     Focuses on types, signatures, calling conventions, decorator effects,
     framework interactions. Asks: "Will this code compile/run without errors?"
     """
-    context = _build_meta_context(intake, anatomy, diff_patches)
+    context = _build_meta_context(intake, anatomy, diff_patches, reviewer_feedback)
     context_ref = f"{context}"
     if repo_path and len(context) > 8000:
         file_path = _write_context_file(context, "meta_mechanical_context.json", repo_path)
@@ -682,13 +696,14 @@ async def meta_systemic(
     depth: str = "standard",
     repo_path: str = "",
     diff_patches: dict[str, str] | None = None,
+    reviewer_feedback: str = "",
 ) -> dict:
     """Systemic lens: How does this code FIT the codebase?
 
     Focuses on patterns, complexity, readability, architectural coherence,
     test coverage. Asks: "Does this change make the codebase better or worse?"
     """
-    context = _build_meta_context(intake, anatomy, diff_patches)
+    context = _build_meta_context(intake, anatomy, diff_patches, reviewer_feedback)
     context_ref = f"{context}"
     if repo_path and len(context) > 8000:
         file_path = _write_context_file(context, "meta_systemic_context.json", repo_path)
@@ -773,10 +788,22 @@ async def review_dimension(
     intake_summary: str = "",
     diff_patches: dict[str, str] | None = None,
     all_dimension_names: list[str] | None = None,
+    reviewer_feedback: str = "",
 ) -> dict:
     ctx_files = context_files or []
     risks = risk_surfaces or []
     can_spawn = current_depth < max_depth
+
+    feedback_section = ""
+    if reviewer_feedback:
+        feedback_section = (
+            "## Human Reviewer Guidance (IMPORTANT)\n\n"
+            "A human reviewer saw the previous round of findings and asked for a re-review "
+            f"with this guidance:\n\n> {reviewer_feedback}\n\n"
+            "Adjust your review accordingly — e.g. if asked to tone it down or drop nitpicks, "
+            "raise your bar and report only findings that clearly meet it; if asked to focus on "
+            "a specific area, prioritize that. Honor this guidance.\n\n"
+        )
 
     pr_context_section = ""
     if pr_narrative or risks:
@@ -837,6 +864,7 @@ async def review_dimension(
         f"{review_prompt}\n\n"
         f"**Target files** (read and analyze these): {', '.join(target_files)}\n"
         f"**Context files** (reference as needed): {', '.join(ctx_files) if ctx_files else 'none'}\n\n"
+        f"{feedback_section}"
         f"{pr_context_section}"
         f"{intake_section}"
         f"{dimensions_section}"
