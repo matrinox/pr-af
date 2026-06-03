@@ -22,6 +22,11 @@ from .config import AUTO_DEPTH_THRESHOLDS, DEPTH_PROFILES, ReviewConfig
 from .diff_engine import parse_unified_diff
 from .evidence import EvidencePackage, extract_evidence_for_findings
 from .github.client import GitHubClient
+from .hitl import (
+    approval_webhook_url,
+    build_hax_client_from_env,
+    request_review_approval,
+)
 from .reasoners.harnesses import (
     adversary_phase,
     anatomy_phase,
@@ -136,15 +141,94 @@ class ReviewOrchestrator:
         self.anatomy_result = anatomy
         print(f"[PR-AF] Anatomy complete: {len(anatomy.files)} files, {len(anatomy.clusters)} clusters", flush=True)
 
-        print("[PR-AF] Phase 3: META-SELECTORS (3 parallel lenses)", flush=True)
-        plan = await self._run_meta_selectors(intake, anatomy, review_depth)
+        # Human-in-the-loop review gate (mirrors SWE-AF's plan-phase approval).
+        # Active only when HAX_API_KEY is set AND we have a real PR to post to;
+        # otherwise hax_client is None and we post directly, exactly as before.
+        hax_client = None
+        if self.input.pr_url and not self.input.dry_run:
+            hax_client = build_hax_client_from_env()
 
+        max_revisions = self.config.hitl.max_review_revisions if hax_client else 0
+        revision_history: list[str] = []
+        reviewer_feedback = ""
+
+        for revision_iter in range(max_revisions + 1):
+            plan, scored_findings = await self._run_review_phases(
+                intake, anatomy, review_depth, reviewer_feedback
+            )
+
+            if hax_client is None:
+                print("[PR-AF] Phase 8: OUTPUT (direct post)", flush=True)
+                return await self._finish(scored_findings, intake, anatomy, plan, post=True)
+
+            decision = await request_review_approval(
+                app=self.app,
+                hax_client=hax_client,
+                pr_intent=intake.pr_summary,
+                findings=scored_findings,
+                pr_label=self._pr_label(),
+                webhook_url=approval_webhook_url(self.app),
+                user_id=self.config.hitl.approval_user_id,
+                expires_in_hours=self.config.hitl.approval_expires_in_hours,
+                revision_iter=revision_iter,
+                revision_history=revision_history,
+                metadata=self._hitl_metadata(),
+            )
+
+            if decision.is_post:
+                approved = [f for f in scored_findings if f.id in decision.selected_finding_ids]
+                print(
+                    f"[PR-AF] HITL approved {len(approved)}/{len(scored_findings)} findings — posting",
+                    flush=True,
+                )
+                return await self._finish(approved, intake, anatomy, plan, post=True)
+
+            if decision.is_rerun and revision_iter < max_revisions:
+                revision_history.append(decision.instructions)
+                reviewer_feedback = self._merge_feedback(revision_history)
+                print(
+                    f"[PR-AF] HITL re-review requested (round {revision_iter + 1}/{max_revisions}): "
+                    f"{decision.instructions!r}",
+                    flush=True,
+                )
+                continue
+
+            # reject, expire/error, or a re-review past the revision cap → no post.
+            reason = "revision cap reached" if decision.is_rerun else decision.action
+            self.app.note(
+                f"hitl: not posting review ({reason}; raw={decision.decision_raw})",
+                tags=["hitl", "no-post", decision.action],
+            )
+            print(f"[PR-AF] HITL: not posting review ({reason})", flush=True)
+            return await self._finish(scored_findings, intake, anatomy, plan, post=False)
+
+        # The loop always returns; this guards against a future edit slipping by.
+        raise RuntimeError("review loop exited without producing a result")
+
+    async def _run_review_phases(
+        self,
+        intake: IntakeResult,
+        anatomy: AnatomyResult,
+        review_depth: str,
+        reviewer_feedback: str = "",
+    ) -> tuple[ReviewPlan, list[ScoredFinding]]:
+        """Run the finding-producing phases (meta-selectors → synthesis).
+
+        Intake and anatomy are computed once by the caller; this is the part
+        re-run when a reviewer requests a re-review. ``reviewer_feedback`` is the
+        accumulated human guidance threaded into dimension selection and the
+        reviewer prompts so a re-run actually respects "tone it down" etc.
+        """
+        print("[PR-AF] Phase 3: META-SELECTORS (3 parallel lenses)", flush=True)
+        plan = await self._run_meta_selectors(intake, anatomy, review_depth, reviewer_feedback)
         print(f"[PR-AF] Meta-selectors complete: {len(plan.dimensions)} dimensions", flush=True)
 
         print("[PR-AF] Phase 4+5: REVIEW (parallel) + LAYER", flush=True)
         findings_queue: asyncio.Queue[list[ReviewFinding] | None] = asyncio.Queue()
 
-        review_task = asyncio.create_task(self._run_parallel_review(plan, findings_queue))
+        review_task = asyncio.create_task(
+            self._run_parallel_review(plan, findings_queue, reviewer_feedback=reviewer_feedback)
+        )
         layer_task = asyncio.create_task(self._run_review_layer(plan, findings_queue, anatomy))
 
         _, layer_result = await asyncio.gather(review_task, layer_task)
@@ -163,17 +247,50 @@ class ReviewOrchestrator:
         print("[PR-AF] Phase 7: SYNTHESIS", flush=True)
         scored_findings = self._synthesize(all_findings, adversary_results)
         print(f"[PR-AF] Synthesis complete: {len(scored_findings)} scored findings", flush=True)
+        return plan, scored_findings
 
-        print("[PR-AF] Phase 8: OUTPUT", flush=True)
-        result = await self._generate_output(scored_findings, intake, anatomy, plan)
+    async def _finish(
+        self,
+        scored_findings: list[ScoredFinding],
+        intake: IntakeResult,
+        anatomy: AnatomyResult,
+        plan: ReviewPlan,
+        *,
+        post: bool,
+    ) -> ReviewResult:
+        """Generate output (optionally posting) and clean up the context dir."""
+        result = await self._generate_output(scored_findings, intake, anatomy, plan, post_to_github=post)
         print(
-            f"[PR-AF] Pipeline complete! {result.summary.total_findings} findings, cost=${result.summary.cost_usd}",
+            f"[PR-AF] Pipeline complete! {result.summary.total_findings} findings, "
+            f"cost=${result.summary.cost_usd}, posted={post}",
             flush=True,
         )
-
         self._cleanup_context_dir()
-
         return result
+
+    def _pr_label(self) -> str:
+        if self.pr_data and self.pr_data.owner and self.pr_data.repo:
+            return f"{self.pr_data.owner}/{self.pr_data.repo}#{self.pr_data.number}"
+        return ""
+
+    def _merge_feedback(self, revision_history: list[str]) -> str:
+        """Collapse accumulated reviewer instructions into one guidance string."""
+        items = [instr.strip() for instr in revision_history if instr and instr.strip()]
+        if not items:
+            return ""
+        return " | ".join(items)
+
+    def _hitl_metadata(self) -> dict[str, Any]:
+        execution_id = ""
+        ctx = getattr(self.app, "ctx", None)
+        if ctx is not None:
+            execution_id = getattr(ctx, "execution_id", "") or ""
+        return {
+            "prLabel": self._pr_label(),
+            "prUrl": self.input.pr_url or "",
+            "reviewId": self.review_id,
+            "executionId": execution_id,
+        }
 
     async def _run_intake(self) -> IntakeResult:
         if self._budget_or_timeout_exhausted("intake"):
@@ -257,7 +374,13 @@ class ReviewOrchestrator:
 
         return plan
 
-    async def _run_meta_selectors(self, intake: IntakeResult, anatomy: AnatomyResult, review_depth: str) -> ReviewPlan:
+    async def _run_meta_selectors(
+        self,
+        intake: IntakeResult,
+        anatomy: AnatomyResult,
+        review_depth: str,
+        reviewer_feedback: str = "",
+    ) -> ReviewPlan:
         if self._budget_or_timeout_exhausted("meta_selectors"):
             raise BudgetExhaustedError("Budget exhausted before meta-selectors")
 
@@ -276,6 +399,7 @@ class ReviewOrchestrator:
                 depth=review_depth,
                 repo_path=self.input.repo_path or "",
                 diff_patches=self._build_file_patches(),
+                reviewer_feedback=reviewer_feedback,
             )
             self.agent_invocations += 1
             self._register_cost("meta_selectors", self._extract_cost(result_raw))
@@ -467,6 +591,7 @@ class ReviewOrchestrator:
         plan: ReviewPlan,
         findings_queue: asyncio.Queue[list[ReviewFinding] | None],
         current_depth: int = 0,
+        reviewer_feedback: str = "",
     ) -> None:
         max_depth = self.config.budget.max_review_depth
         semaphore = asyncio.Semaphore(self.config.budget.max_concurrent_reviewers)
@@ -490,6 +615,7 @@ class ReviewOrchestrator:
                     intake_summary=self.intake_result.pr_summary if self.intake_result else "",
                     diff_patches=dim_patches if dim_patches else None,
                     all_dimension_names=[d.name for d in plan.dimensions if d.id != dim.id],
+                    reviewer_feedback=reviewer_feedback,
                 )
                 self.agent_invocations += 1
                 self._register_cost("review", self._extract_cost(result_raw))
@@ -789,6 +915,8 @@ class ReviewOrchestrator:
         intake: IntakeResult,
         anatomy: AnatomyResult,
         plan: ReviewPlan,
+        *,
+        post_to_github: bool = True,
     ) -> ReviewResult:
         if self.pr_data is None:
             raise RuntimeError("PR data not initialized")
@@ -851,7 +979,7 @@ class ReviewOrchestrator:
             comments=comments,
         )
 
-        if not self.input.dry_run and self.input.pr_url:
+        if post_to_github and not self.input.dry_run and self.input.pr_url:
             client = GitHubClient()
             try:
                 await client.post_review(
