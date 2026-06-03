@@ -159,6 +159,35 @@ AUTO_DEPTH_THRESHOLDS = {
 }
 
 
+class HITLConfig(BaseModel):
+    """Human-in-the-loop review gate (mirrors SWE-AF's plan-phase approval).
+
+    When enabled, PR-AF does not post its review directly. Instead it summarizes
+    the findings, sends a hax form request to a workspace member, and pauses
+    until they approve a subset, request a re-review with instructions, or
+    reject. Auto-enables when ``HAX_API_KEY`` is set — same trigger SWE-AF uses
+    (``build_hax_client_from_env`` returns ``None`` when it is unset, which the
+    orchestrator treats as "HITL off, post directly").
+    """
+
+    # Mirrors the on/off switch in build_hax_client_from_env: HITL is active
+    # only when HAX_API_KEY is present. Kept here for observability/overrides.
+    enabled: bool = Field(
+        default_factory=lambda: bool(os.getenv("HAX_API_KEY", "").strip())
+    )
+    # Optional routing: which hax workspace user receives the request.
+    approval_user_id: str | None = Field(
+        default_factory=lambda: os.getenv("AGENTFIELD_APPROVAL_USER_ID") or None
+    )
+    # How long the pause stays open before it expires (treated as a reject).
+    # Plain config default — matches SWE-AF's BuildConfig.approval_expires_in_hours
+    # (not env-driven, to avoid introducing PR-AF-specific env var names).
+    approval_expires_in_hours: int = 72
+    # How many "re-review with instructions" rounds before giving up (no post).
+    # Matches SWE-AF's BuildConfig.max_plan_revision_iterations.
+    max_review_revisions: int = 2
+
+
 class ReviewConfig(BaseModel):
     """Top-level configuration combining all sub-configs."""
 
@@ -166,6 +195,7 @@ class ReviewConfig(BaseModel):
     models: ModelConfig = Field(default_factory=ModelConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     comments: CommentConfig = Field(default_factory=CommentConfig)
+    hitl: HITLConfig = Field(default_factory=HITLConfig)
 
     # File ignore patterns (glob)
     ignore_paths: list[str] = Field(
