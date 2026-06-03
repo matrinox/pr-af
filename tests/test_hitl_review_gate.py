@@ -16,8 +16,10 @@ from pr_af.hitl import (
     ACTION_POST,
     ACTION_REJECT,
     ACTION_RERUN,
+    HAX_REVIEW_TEMPLATE,
     build_hax_client_from_env,
-    build_review_form,
+    build_review_payload,
+    clean_intent,
     parse_review_decision,
 )
 from pr_af.hitl.client import create_hax_form_request_with_timeout
@@ -58,32 +60,51 @@ def test_build_hax_client_returns_client_with_api_key(monkeypatch):
     assert client is not None
 
 
-# --- form shape ----------------------------------------------------------
+# --- payload shape -------------------------------------------------------
 
 
-def test_form_has_one_checkbox_option_per_finding_plus_action_and_textarea():
+def test_payload_has_one_finding_entry_per_finding_all_default_selected():
     findings = [_finding("f1"), _finding("f2", severity="nitpick"), _finding("f3")]
-    form = build_review_form(pr_intent="adds caching", findings=findings, title="t")
-    payload = form.to_payload()
-    fields = {f["id"]: f for f in payload["fields"]}
+    payload = build_review_payload(pr_intent="adds caching", findings=findings, title="t")
 
-    assert set(fields) == {"findings_to_post", "action", "instructions"}
-    options = fields["findings_to_post"]["options"]
-    assert [o["value"] for o in options] == ["f1", "f2", "f3"]
-    # All findings pre-checked by default so "submit as-is" posts everything.
-    assert fields["findings_to_post"]["defaultValue"] == ["f1", "f2", "f3"]
-    assert {o["value"] for o in fields["action"]["options"]} == {
-        ACTION_POST,
-        ACTION_RERUN,
-        ACTION_REJECT,
-    }
+    assert [f["id"] for f in payload["findings"]] == ["f1", "f2", "f3"]
+    # All findings pre-checked by default so "post selected" posts everything.
+    assert all(f["defaultSelected"] is True for f in payload["findings"])
+    # Severity + location are carried through for the rich UI.
+    assert payload["findings"][0]["severity"] == "important"
+    assert payload["findings"][0]["filePath"] == "src/foo.py"
+    assert payload["findings"][0]["lineStart"] == 10
+    assert payload["intent"] == "adds caching"
 
 
-def test_form_omits_checkbox_group_when_no_findings():
-    form = build_review_form(pr_intent="docs only", findings=[], title="t")
-    field_ids = {f["id"] for f in form.to_payload()["fields"]}
-    assert "findings_to_post" not in field_ids
-    assert "action" in field_ids  # reviewer can still approve/reject
+def test_payload_carries_pr_meta_and_revision():
+    payload = build_review_payload(
+        pr_intent="adds caching",
+        findings=[_finding("f1")],
+        title="t",
+        pr_meta={"repo": "o/r", "number": 7, "author": "", "url": ""},
+        revision_iter=1,
+        revision_history=["tone it down", ""],
+    )
+    # Empty meta values are dropped so optional zod fields stay absent.
+    assert payload["pr"] == {"repo": "o/r", "number": 7}
+    assert payload["revision"]["iteration"] == 1
+    assert payload["revision"]["priorInstructions"] == ["tone it down"]
+
+
+def test_payload_handles_no_findings():
+    payload = build_review_payload(pr_intent="docs only", findings=[], title="t")
+    assert payload["findings"] == []
+    assert "no findings" in payload["reviewSummary"]
+
+
+def test_clean_intent_strips_html_and_truncates():
+    raw = "<details><summary>Release notes</summary><p>Bumps <a href='x'>pkg</a></p></details>"
+    cleaned = clean_intent(raw)
+    assert "<" not in cleaned and ">" not in cleaned
+    assert "Release notes" in cleaned
+    assert clean_intent("x" * 5000) .endswith("…")
+    assert len(clean_intent("x" * 5000)) <= 701  # max_chars + ellipsis
 
 
 # --- decision parsing ----------------------------------------------------
@@ -161,7 +182,8 @@ async def test_create_request_fails_fast_when_hax_wedges():
         await create_hax_form_request_with_timeout(
             app=_FakeApp(),
             hax_client=_WedgedHax(),
-            form=SimpleNamespace(to_payload=lambda: {"fields": []}),
+            payload={"findings": []},
+            request_type=HAX_REVIEW_TEMPLATE,
             title="t",
             description=None,
             expires_in_seconds=3600,

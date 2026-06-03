@@ -63,7 +63,8 @@ async def create_hax_form_request_with_timeout(
     *,
     app: Any,
     hax_client: HaxClient,
-    form: Any,
+    payload: dict[str, Any],
+    request_type: str,
     title: str,
     description: str | None,
     expires_in_seconds: int,
@@ -72,21 +73,24 @@ async def create_hax_form_request_with_timeout(
     metadata: dict[str, Any] | None,
     timeout_seconds: float = HAX_CREATE_REQUEST_TIMEOUT_SECONDS,
 ) -> Any:
-    """Submit a hax form-builder request with a hard timeout.
+    """Submit a hax request of ``request_type`` with a hard timeout.
 
     Runs the synchronous ``hax_client.create_request`` in a worker thread under
     ``asyncio.wait_for`` so a wedged hax-sdk fails fast (``RuntimeError``)
     instead of silently burning the reasoner's active-time budget. Returns the
     ``CreatedRequest``; the caller passes ``.id`` / ``.url`` to ``app.pause``.
+
+    ``payload`` must satisfy the registered hax template's schema — the hax
+    service validates it server-side and rejects unknown ``request_type`` values.
     """
     app.note(
-        f"hitl: submitting hax form request ({title!r})",
+        f"hitl: submitting hax request ({request_type}: {title!r})",
         tags=["hitl", "hax", "create_request"],
     )
 
     kwargs: dict[str, Any] = {
-        "type": "form-builder",
-        "payload": form.to_payload(),
+        "type": request_type,
+        "payload": payload,
         "title": title,
         "expires_in_seconds": expires_in_seconds,
     }
