@@ -59,6 +59,24 @@ def _extract_pr_number(pr_url: str) -> int | None:
     return None
 
 
+def _resolve_budget_caps(
+    max_cost_usd: float | None, max_duration_seconds: int | None
+) -> tuple[float, int]:
+    """Resolve the review budget caps.
+
+    When the caller does not pass an explicit value, fall back to the
+    ``PR_AF_MAX_COST_USD`` / ``PR_AF_MAX_DURATION_SECONDS`` env vars (so the
+    budget can be tuned per deployment without a code change), and finally to
+    the historical defaults (2.0 USD / 300s) when neither is set. An explicit
+    argument always wins over the env var.
+    """
+    if max_cost_usd is None:
+        max_cost_usd = float(os.getenv("PR_AF_MAX_COST_USD", "2.0"))
+    if max_duration_seconds is None:
+        max_duration_seconds = int(os.getenv("PR_AF_MAX_DURATION_SECONDS", "300"))
+    return max_cost_usd, max_duration_seconds
+
+
 def _checkout_pr_branch(target_dir: str, pr_number: int) -> None:
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo"}
     # Fetch the PR head into FETCH_HEAD rather than directly into a local
@@ -166,8 +184,8 @@ async def review(
     base_ref: str | None = None,
     head_ref: str | None = None,
     depth: str = "auto",
-    max_cost_usd: float = 2.0,
-    max_duration_seconds: int = 300,
+    max_cost_usd: float | None = None,
+    max_duration_seconds: int | None = None,
     focus: str = "auto",
     ignore_paths: list[str] | None = None,
     hints: list[str] | None = None,
@@ -185,6 +203,9 @@ async def review(
         f"diff_text={'<set>' if diff_text else None}, repo_path={repo_path!r}, "
         f"depth={depth!r}, dry_run={dry_run!r}",
         flush=True,
+    )
+    max_cost_usd, max_duration_seconds = _resolve_budget_caps(
+        max_cost_usd, max_duration_seconds
     )
     review_input = ReviewInput(
         pr_url=pr_url,
