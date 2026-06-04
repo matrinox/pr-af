@@ -14,6 +14,7 @@ decides the outcome.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -28,18 +29,26 @@ if TYPE_CHECKING:
     from ..schemas.output import ScoredFinding
 
 
-# Action chosen by the reviewer in the form's "action" radio.
+# The hax template this gate renders into. Registered in hax-sdk under
+# src/templates/pr-af-review (id "pr-af-review-v1"). The template emits the same
+# ``{template, values: {...}}`` response envelope form-builder uses, so the
+# decision parser below is template-agnostic.
+HAX_REVIEW_TEMPLATE = "pr-af-review-v1"
+
+# Action chosen by the reviewer in the template's action buttons. These string
+# values are the contract with the hax template's response `values.action`.
 ACTION_POST = "post_selected"
 ACTION_RERUN = "rerun"
 ACTION_REJECT = "reject"
 _VALID_ACTIONS = {ACTION_POST, ACTION_RERUN, ACTION_REJECT}
 
-_SEVERITY_EMOJI = {
-    "critical": "🔴",
-    "important": "🟠",
-    "suggestion": "🔵",
-    "nitpick": "⚪",
-}
+# Longest PR-intent blurb shown in the form. The raw PR body (e.g. a Dependabot
+# changelog) is stripped of HTML and truncated to this so the form stays legible.
+_MAX_INTENT_CHARS = 700
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t]+")
+_BLANKLINES_RE = re.compile(r"\n{3,}")
 
 
 @dataclass
@@ -65,101 +74,91 @@ class ReviewDecision:
         return self.action == ACTION_REJECT
 
 
-def _finding_option(finding: ScoredFinding) -> dict[str, str]:
-    """One checkbox option per finding: ``id`` is the value, label is human."""
-    emoji = _SEVERITY_EMOJI.get(finding.severity, "•")
-    loc = finding.file_path or "(no file)"
-    if finding.line_start and finding.line_start > 0:
-        loc = f"{loc}:{finding.line_start}"
-    return {
-        "value": finding.id,
-        "label": f"{emoji} [{finding.severity}] {loc} — {finding.title}",
+def clean_intent(text: str | None, max_chars: int = _MAX_INTENT_CHARS) -> str:
+    """Turn a raw PR body into a short, legible intent blurb.
+
+    PR bodies (especially bot-authored ones like Dependabot) are often a wall of
+    HTML — ``<details>``, ``<a href>``, changelog tables. The hax template
+    renders the intent as markdown, where raw HTML shows up literally, so we
+    strip tags, collapse whitespace, and truncate.
+    """
+    if not text:
+        return ""
+    stripped = _HTML_TAG_RE.sub(" ", text)
+    stripped = _WS_RE.sub(" ", stripped)
+    stripped = _BLANKLINES_RE.sub("\n\n", stripped)
+    stripped = "\n".join(line.strip() for line in stripped.splitlines())
+    stripped = stripped.strip()
+    if len(stripped) > max_chars:
+        stripped = stripped[:max_chars].rstrip() + "…"
+    return stripped
+
+
+def _finding_payload(finding: ScoredFinding) -> dict[str, Any]:
+    """One finding entry for the hax template (camelCase per its zod schema)."""
+    entry: dict[str, Any] = {
+        "id": finding.id,
+        "severity": finding.severity,
+        "title": finding.title,
+        # All findings start checked, matching the prior "submit posts all" default.
+        "defaultSelected": True,
     }
+    if finding.file_path:
+        entry["filePath"] = finding.file_path
+    if finding.line_start and finding.line_start > 0:
+        entry["lineStart"] = finding.line_start
+    if finding.line_end and finding.line_end > 0:
+        entry["lineEnd"] = finding.line_end
+    if finding.body:
+        entry["body"] = finding.body
+    if finding.suggestion:
+        entry["suggestion"] = finding.suggestion
+    if finding.dimension_name:
+        entry["dimension"] = finding.dimension_name
+    if finding.confidence is not None:
+        entry["confidence"] = finding.confidence
+    return entry
 
 
-def _build_description(
+def build_review_payload(
+    *,
     pr_intent: str,
     findings: list[ScoredFinding],
-    revision_iter: int,
-    revision_history: list[str],
-) -> str:
-    """Markdown blurb shown above the form: PR intent + what's being asked."""
+    title: str,
+    pr_meta: dict[str, Any] | None = None,
+    revision_iter: int = 0,
+    revision_history: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the ``pr-af-review-v1`` request payload (validated server-side).
+
+    Shape matches ``prAfReviewPayloadSchema`` in the hax-sdk template.
+    """
     counts: dict[str, int] = {}
     for f in findings:
         counts[f.severity] = counts.get(f.severity, 0) + 1
     count_str = ", ".join(f"{n} {sev}" for sev, n in counts.items()) or "no findings"
 
-    lines = []
-    if pr_intent:
-        lines.append("**PR intent:** " + pr_intent.strip())
-        lines.append("")
-    lines.append(
-        f"PR-AF found **{len(findings)}** finding(s) ({count_str}). "
-        "Check the ones to post, or request a re-review with instructions."
-    )
-    if revision_iter > 0:
-        lines.append("")
-        lines.append(f"_Revision round {revision_iter}._")
-    if revision_history:
-        lines.append("")
-        lines.append("Prior instructions:")
-        for idx, instr in enumerate(revision_history, start=1):
-            if instr:
-                lines.append(f"{idx}. {instr}")
-    return "\n".join(lines)
-
-
-def build_review_form(
-    *,
-    pr_intent: str,
-    findings: list[ScoredFinding],
-    title: str,
-    revision_iter: int = 0,
-    revision_history: list[str] | None = None,
-) -> Any:
-    """Translate the review into a ``hax.FormBuilder`` (imported lazily)."""
-    from hax import FormBuilder
-
-    all_ids = [f.id for f in findings]
-    options = [_finding_option(f) for f in findings]
-
-    form = (
-        FormBuilder()
-        .title(title)
-        .description(
-            _build_description(pr_intent, findings, revision_iter, revision_history or [])
-        )
-        .submit_label("Submit decision")
-    )
-
-    # checkbox_group requires at least one option; skip it when there are no
-    # findings (an empty review still lets the reviewer approve/reject).
-    if options:
-        form.checkbox_group(
-            "findings_to_post",
-            label="Findings to post",
-            description="Only the checked findings are posted to the PR.",
-            options=options,
-            default_value=all_ids,
-        )
-
-    form.radio_group(
-        "action",
-        label="Action",
-        options=[
-            {"value": ACTION_POST, "label": "Post selected findings"},
-            {"value": ACTION_RERUN, "label": "Re-review with instructions below"},
-            {"value": ACTION_REJECT, "label": "Reject — post nothing"},
-        ],
-        default_value=ACTION_POST,
-    )
-    form.textarea(
-        "instructions",
-        label="Re-review instructions (optional)",
-        description="Used when action is 'Re-review'. E.g. 'too aggressive, tone it down'.",
-        required=False,
-    )
-    return form
+    payload: dict[str, Any] = {
+        "title": title,
+        "intent": clean_intent(pr_intent),
+        "reviewSummary": f"PR-AF found {len(findings)} finding(s) ({count_str}).",
+        "findings": [_finding_payload(f) for f in findings],
+        "postLabel": "Post selected",
+        "rerunLabel": "Re-review with instructions",
+        "rejectLabel": "Reject",
+        "instructionsPlaceholder": "e.g. too aggressive, tone it down and drop the nitpicks",
+    }
+    if pr_meta:
+        # Drop empties so optional zod fields stay absent rather than "".
+        cleaned = {k: v for k, v in pr_meta.items() if v not in (None, "")}
+        if cleaned:
+            payload["pr"] = cleaned
+    if revision_iter > 0 or revision_history:
+        payload["revision"] = {
+            "iteration": revision_iter,
+            "priorInstructions": [i for i in (revision_history or []) if i and i.strip()],
+        }
+    return payload
 
 
 def _coerce_str(value: Any) -> str:
@@ -229,11 +228,12 @@ async def request_review_approval(
     webhook_url: str | None,
     user_id: str | None,
     expires_in_hours: int,
+    pr_meta: dict[str, Any] | None = None,
     revision_iter: int = 0,
     revision_history: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ReviewDecision:
-    """Build the form, create the hax request, pause, return the decision.
+    """Build the payload, create the hax request, pause, return the decision.
 
     Any failure to create the request or pause is surfaced as a reject so the
     pipeline never posts an unreviewed review when the gate is enabled.
@@ -245,25 +245,27 @@ async def request_review_approval(
         title = f"{title} — {pr_label}"
 
     try:
-        form = build_review_form(
+        payload = build_review_payload(
             pr_intent=pr_intent,
             findings=findings,
             title=title,
+            pr_meta=pr_meta,
             revision_iter=revision_iter,
             revision_history=revision_history,
         )
     except Exception as exc:
         app.note(
-            f"hitl: failed to build review form: {exc}",
-            tags=["hitl", "form", "error"],
+            f"hitl: failed to build review payload: {exc}",
+            tags=["hitl", "payload", "error"],
         )
-        return ReviewDecision(action=ACTION_REJECT, instructions=f"form build failed: {exc}")
+        return ReviewDecision(action=ACTION_REJECT, instructions=f"payload build failed: {exc}")
 
     try:
         created = await create_hax_form_request_with_timeout(
             app=app,
             hax_client=hax_client,
-            form=form,
+            payload=payload,
+            request_type=HAX_REVIEW_TEMPLATE,
             title=title,
             description=None,
             expires_in_seconds=expires_in_hours * 3600,

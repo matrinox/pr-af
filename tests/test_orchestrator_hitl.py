@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 import pr_af.orchestrator as orch_mod
 from pr_af.hitl import ACTION_POST, ACTION_REJECT, ACTION_RERUN, ReviewDecision
 from pr_af.orchestrator import ReviewOrchestrator
@@ -136,6 +134,15 @@ async def test_rerun_then_post_threads_feedback(monkeypatch):
     assert feedbacks[0] == ""
     assert "tone it down" in feedbacks[1]
     assert captured["post"] is True
+
+
+async def test_hitl_on_zero_findings_skips_gate(monkeypatch):
+    orch, captured, feedbacks, calls = _make_orchestrator(
+        monkeypatch, findings=[], hitl_on=True, decisions=[]
+    )
+    await orch.run()
+    assert captured["post"] is False  # nothing posted to a public repo
+    assert calls["n"] == 0  # human never bothered for an empty review
 
 
 async def test_reject_posts_nothing(monkeypatch):

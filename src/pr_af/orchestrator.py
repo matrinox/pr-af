@@ -161,12 +161,23 @@ class ReviewOrchestrator:
                 print("[PR-AF] Phase 8: OUTPUT (direct post)", flush=True)
                 return await self._finish(scored_findings, intake, anatomy, plan, post=True)
 
+            # Nothing to triage: don't bother a human (and don't auto-post an
+            # empty "approved" review to a public repo). Complete silently.
+            if not scored_findings:
+                self.app.note(
+                    "hitl: no findings — skipping review gate, posting nothing",
+                    tags=["hitl", "no-post", "no-findings"],
+                )
+                print("[PR-AF] HITL: no findings — skipping gate, not posting", flush=True)
+                return await self._finish(scored_findings, intake, anatomy, plan, post=False)
+
             decision = await request_review_approval(
                 app=self.app,
                 hax_client=hax_client,
                 pr_intent=intake.pr_summary,
                 findings=scored_findings,
                 pr_label=self._pr_label(),
+                pr_meta=self._pr_meta(),
                 webhook_url=approval_webhook_url(self.app),
                 user_id=self.config.hitl.approval_user_id,
                 expires_in_hours=self.config.hitl.approval_expires_in_hours,
@@ -272,6 +283,28 @@ class ReviewOrchestrator:
         if self.pr_data and self.pr_data.owner and self.pr_data.repo:
             return f"{self.pr_data.owner}/{self.pr_data.repo}#{self.pr_data.number}"
         return ""
+
+    def _pr_meta(self) -> dict[str, Any]:
+        """PR metadata block for the hax review template (camelCase keys)."""
+        pr = self.pr_data
+        if not pr:
+            return {}
+        url = self.input.pr_url or ""
+        if not url and pr.owner and pr.repo and pr.number:
+            url = f"https://github.com/{pr.owner}/{pr.repo}/pull/{pr.number}"
+        repo = f"{pr.owner}/{pr.repo}" if pr.owner and pr.repo else (pr.repo or "")
+        meta: dict[str, Any] = {
+            "title": pr.title or "",
+            "number": pr.number or None,
+            "url": url,
+            "repo": repo,
+            "author": pr.author or "",
+        }
+        if pr.changed_files:
+            meta["filesChangedCount"] = len(pr.changed_files)
+            meta["additionsCount"] = sum(f.additions for f in pr.changed_files)
+            meta["deletionsCount"] = sum(f.deletions for f in pr.changed_files)
+        return meta
 
     def _merge_feedback(self, revision_history: list[str]) -> str:
         """Collapse accumulated reviewer instructions into one guidance string."""
