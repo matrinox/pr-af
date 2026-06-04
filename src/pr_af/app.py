@@ -61,18 +61,34 @@ def _extract_pr_number(pr_url: str) -> int | None:
 
 def _checkout_pr_branch(target_dir: str, pr_number: int) -> None:
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo"}
-    subprocess.run(
-        ["git", "-C", target_dir, "fetch", "--depth", "1", "origin", f"pull/{pr_number}/head:pr-review"],
+    # Fetch the PR head into FETCH_HEAD rather than directly into a local
+    # ``pr-review`` branch. When the workspace is reused across reviews, the
+    # previous run leaves ``pr-review`` checked out, and
+    # ``git fetch origin pull/N/head:pr-review`` is *refused* by git
+    # ("refusing to fetch into branch '...' checked out at ..."). That failure
+    # was previously swallowed (capture_output, no return-code check), so every
+    # PR after the first in a workspace's lifetime got reviewed against the
+    # first PR's tree — producing silent "no findings" reviews. Fetching to
+    # FETCH_HEAD always succeeds, and ``checkout -B`` then (re)points
+    # ``pr-review`` at it even when it is the currently checked-out branch.
+    fetch = subprocess.run(
+        ["git", "-C", target_dir, "fetch", "--depth", "1", "origin", f"pull/{pr_number}/head"],
         env=git_env,
         timeout=300,
         capture_output=True,
+        text=True,
     )
-    subprocess.run(
-        ["git", "-C", target_dir, "checkout", "pr-review"],
+    if fetch.returncode != 0:
+        raise ValueError(f"git fetch of PR #{pr_number} head failed: {fetch.stderr.strip()}")
+    checkout = subprocess.run(
+        ["git", "-C", target_dir, "checkout", "-B", "pr-review", "FETCH_HEAD"],
         env=git_env,
         timeout=30,
         capture_output=True,
+        text=True,
     )
+    if checkout.returncode != 0:
+        raise ValueError(f"git checkout of PR #{pr_number} (pr-review) failed: {checkout.stderr.strip()}")
 
 
 def _resolve_repo(repo_path: str | None, pr_url: str | None) -> str:
