@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ..schemas.severity import normalize_severity
 from .client import (
     create_hax_form_request_with_timeout,
     extract_values_from_raw,
@@ -98,7 +99,10 @@ def _finding_payload(finding: ScoredFinding) -> dict[str, Any]:
     """One finding entry for the hax template (camelCase per its zod schema)."""
     entry: dict[str, Any] = {
         "id": finding.id,
-        "severity": finding.severity,
+        # Last line of defense before the hax-sdk zod enum: a finding built off
+        # the validated path could still carry a stray label. Normalize so the
+        # create never 422s on severity.
+        "severity": normalize_severity(finding.severity),
         "title": finding.title,
         # All findings start checked, matching the prior "submit posts all" default.
         "defaultSelected": True,

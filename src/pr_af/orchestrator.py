@@ -60,6 +60,7 @@ from .schemas.pipeline import (
     ReviewFinding,
     ReviewPlan,
 )
+from .schemas.severity import normalize_severity
 from .scoring import deduplicate_exact, determine_review_event, score_findings
 
 
@@ -206,11 +207,20 @@ class ReviewOrchestrator:
 
             # reject, expire/error, or a re-review past the revision cap → no post.
             reason = "revision cap reached" if decision.is_rerun else decision.action
+            # Surface the underlying cause loudly: a create_request/pause failure
+            # carries its exception text in `instructions`, and dropping a whole
+            # computed review on a transient hax hiccup must not look silent.
+            detail = (decision.instructions or "").strip()
+            detail_suffix = f": {detail}" if detail else ""
             self.app.note(
-                f"hitl: not posting review ({reason}; raw={decision.decision_raw})",
+                f"hitl: not posting review ({reason}; raw={decision.decision_raw}){detail_suffix}",
                 tags=["hitl", "no-post", decision.action],
             )
-            print(f"[PR-AF] HITL: not posting review ({reason})", flush=True)
+            print(
+                f"[PR-AF] HITL: NOT posting {len(scored_findings)} finding(s) "
+                f"({reason}{detail_suffix})",
+                flush=True,
+            )
             return await self._finish(scored_findings, intake, anatomy, plan, post=False)
 
         # The loop always returns; this guards against a future edit slipping by.
@@ -534,7 +544,8 @@ class ReviewOrchestrator:
                 updated = f.model_copy(
                     update={
                         "confidence": max(0.1, vf.get("revised_confidence", 0.3)),
-                        "severity": vf.get("revised_severity", "suggestion") or "suggestion",
+                        # model_copy bypasses validators, so normalize explicitly.
+                        "severity": normalize_severity(vf.get("revised_severity")),
                     }
                 )
                 updated_findings.append(updated)
@@ -544,8 +555,9 @@ class ReviewOrchestrator:
                 if revised_conf is not None and isinstance(revised_conf, (int, float)):
                     updates["confidence"] = float(revised_conf)
                 revised_sev = vf.get("revised_severity")
-                if revised_sev and revised_sev in ("critical", "important", "suggestion", "nitpick"):
-                    updates["severity"] = revised_sev
+                if revised_sev:
+                    # model_copy bypasses validators, so normalize explicitly.
+                    updates["severity"] = normalize_severity(revised_sev)
                 if updates:
                     updated_findings.append(f.model_copy(update=updates))
                 else:

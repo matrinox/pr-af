@@ -18,6 +18,7 @@ from ..schemas.pipeline import (
     ReviewFinding,
     ReviewPlan,
 )
+from ..schemas.severity import Severity  # noqa: TC001 - runtime-needed pydantic field type
 from . import router
 
 
@@ -44,7 +45,7 @@ class _ReviewFindingsResult(BaseModel):
 
 class _CompoundFinding(BaseModel):
     title: str = ""
-    severity: str = "suggestion"
+    severity: Severity = "suggestion"
     file_path: str = ""
     line_start: int = 0
     line_end: int = 0
@@ -906,6 +907,9 @@ async def review_dimension(
         f"handling, test coverage gaps for specific scenarios. The code works but could be "
         f"more robust.\n"
         f"- **nitpick**: Naming, style, readability, documentation. Truly cosmetic.\n\n"
+        f"The `severity` field MUST be EXACTLY one of these four lowercase strings: "
+        f"`critical`, `important`, `suggestion`, `nitpick`. Do NOT use `high`, `medium`, "
+        f"`low`, `warning`, or any other label.\n\n"
         f"If you're unsure whether something is critical or important, provide your reasoning "
         f"in the `body` field and let the confidence score reflect your uncertainty.\n\n"
         f"## False-Positive Prevention (CRITICAL)\n\n"
@@ -956,7 +960,17 @@ async def review_dimension(
         schema=_ReviewFindingsResult,
         cwd=repo_path or None,
     )
-    parsed = result.parsed if result.parsed else _ReviewFindingsResult()
+    if result.parsed:
+        parsed = result.parsed
+    else:
+        # Schema parse failed entirely — don't silently report "0 findings",
+        # which is indistinguishable from a clean review. Make it visible.
+        print(
+            "[PR-AF] review_dimension: schema parse failed — treating as 0 "
+            f"findings for this dimension (error={getattr(result, 'error_message', None)!r})",
+            flush=True,
+        )
+        parsed = _ReviewFindingsResult()
     sub_review_dicts = []
     if can_spawn and parsed.sub_reviews:
         sub_review_dicts = [
@@ -1053,6 +1067,7 @@ async def compound_finder_phase(
         "- If a compound issue exists, emit NEW findings only. Do not repeat original findings.\n"
         "- Each output finding must include: title, severity, file_path, line_start, line_end, "
         "body, evidence, suggestion, confidence, tags, and contributing_findings.\n"
+        "- `severity` MUST be exactly one of: `critical`, `important`, `suggestion`, `nitpick`.\n"
         "- `contributing_findings` must list the exact titles from this cluster that combine.\n"
         "- Only emit findings with confidence >= 0.6 and concrete evidence.\n\n"
         + findings_ref
