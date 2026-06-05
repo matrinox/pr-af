@@ -48,9 +48,19 @@ def approval_webhook_url(app: Any) -> str | None:
     Mirrors the URL SWE-AF's plan-approval gate uses
     (``{cp_base_url}/api/v1/webhooks/approval-response``). Returns ``None`` when
     no control-plane URL can be resolved.
+
+    ``AGENTFIELD_PUBLIC_URL`` takes precedence: this callback is invoked by
+    hax-sdk, which lives in a *separate* Railway project, so it must be a
+    publicly reachable URL — not the ``AGENTFIELD_SERVER`` internal address
+    (e.g. ``control-plane.railway.internal``) the agent uses to call the CP.
+    Conflating the two is what made an answered review undeliverable: the
+    webhook ``fetch failed`` because the internal host doesn't resolve
+    cross-project. Falls back to ``AGENTFIELD_SERVER`` for single-project /
+    local setups where the two are the same.
     """
     cp_base = (
-        getattr(app, "agentfield_server", None)
+        os.environ.get("AGENTFIELD_PUBLIC_URL")
+        or getattr(app, "agentfield_server", None)
         or os.environ.get("AGENTFIELD_SERVER")
         or ""
     ).rstrip("/")
