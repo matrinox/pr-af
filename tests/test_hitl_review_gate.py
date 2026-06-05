@@ -17,6 +17,7 @@ from pr_af.hitl import (
     ACTION_REJECT,
     ACTION_RERUN,
     HAX_REVIEW_TEMPLATE,
+    approval_webhook_url,
     build_hax_client_from_env,
     build_review_payload,
     clean_intent,
@@ -165,6 +166,45 @@ def test_values_nested_under_response_key_are_found():
     )
     decision = parse_review_decision(res, ["f1", "f2"])
     assert decision.selected_finding_ids == {"f2"}
+
+
+# --- callback URL resolution ---------------------------------------------
+#
+# Contract: the approval callback is invoked by hax-sdk (a separate Railway
+# project), so a public URL must win over the internal AGENTFIELD_SERVER the
+# agent uses to reach the CP. Conflating them made answered reviews
+# undeliverable (the webhook "fetch failed" on an internal hostname).
+
+
+def test_webhook_url_prefers_public_env_over_internal_server(monkeypatch):
+    monkeypatch.setenv("AGENTFIELD_PUBLIC_URL", "https://cp.public.example")
+    monkeypatch.setenv("AGENTFIELD_SERVER", "http://control-plane.railway.internal:8080")
+    app = SimpleNamespace(agentfield_server="http://control-plane.railway.internal:8080")
+    assert (
+        approval_webhook_url(app)
+        == "https://cp.public.example/api/v1/webhooks/approval-response"
+    )
+
+
+def test_webhook_url_falls_back_to_server_when_no_public(monkeypatch):
+    monkeypatch.delenv("AGENTFIELD_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("AGENTFIELD_SERVER", raising=False)
+    app = SimpleNamespace(agentfield_server="http://cp.local:8080")
+    assert approval_webhook_url(app) == "http://cp.local:8080/api/v1/webhooks/approval-response"
+
+
+def test_webhook_url_uses_server_env_when_app_attr_missing(monkeypatch):
+    monkeypatch.delenv("AGENTFIELD_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("AGENTFIELD_SERVER", "http://cp.env:8080")
+    app = SimpleNamespace(agentfield_server=None)
+    assert approval_webhook_url(app) == "http://cp.env:8080/api/v1/webhooks/approval-response"
+
+
+def test_webhook_url_none_when_nothing_configured(monkeypatch):
+    monkeypatch.delenv("AGENTFIELD_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("AGENTFIELD_SERVER", raising=False)
+    app = SimpleNamespace(agentfield_server=None)
+    assert approval_webhook_url(app) is None
 
 
 # --- watchdog safety -----------------------------------------------------
