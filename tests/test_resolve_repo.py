@@ -17,11 +17,14 @@ function's internals.
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from pr_af.app import _checkout_pr_branch
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _git(*args: str, cwd: Path) -> str:

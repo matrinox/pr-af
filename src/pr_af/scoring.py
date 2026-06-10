@@ -39,9 +39,32 @@ def score_findings(
 
     scored: list[ScoredFinding] = []
 
+    # Severity normalization — reviewer LLMs sometimes emit uppercase or aliases
+    # like "high"/"medium". Map them to the canonical lowercase rubric so downstream
+    # code (emoji lookup, by_severity counting, severity_rank gates) doesn't break.
+    aliases = {
+        "critical": "critical",
+        "high": "critical",
+        "blocker": "critical",
+        "important": "important",
+        "medium": "important",
+        "major": "important",
+        "suggestion": "suggestion",
+        "minor": "suggestion",
+        "low": "suggestion",
+        "nitpick": "nitpick",
+        "info": "nitpick",
+        "trivia": "nitpick",
+        "trivial": "nitpick",
+    }
+
+    def _norm_sev(s: str) -> str:
+        return aliases.get((s or "").strip().lower(), "suggestion")
+
     for finding in findings:
+        norm_sev = _norm_sev(finding.severity)
         # Base weight from severity
-        base = config.base_weights.get(finding.severity, 0.3)
+        base = config.base_weights.get(norm_sev, 0.3)
 
         # Confidence-weighted base
         score = base * finding.confidence
@@ -70,7 +93,7 @@ def score_findings(
             active_multipliers.append("blast_radius_high")
 
         # Confidence threshold filtering
-        min_confidence = config.confidence_thresholds.get(finding.severity, 0.5)
+        min_confidence = config.confidence_thresholds.get(norm_sev, 0.5)
         if finding.confidence < min_confidence:
             continue  # Drop low-confidence findings
 
@@ -82,7 +105,7 @@ def score_findings(
                 file_path=finding.file_path,
                 line_start=finding.line_start,
                 line_end=finding.line_end,
-                severity=finding.severity,
+                severity=norm_sev,
                 title=finding.title,
                 body=finding.body,
                 suggestion=finding.suggestion,
@@ -122,19 +145,19 @@ def score_findings(
 
 
 def determine_review_event(findings: list[ScoredFinding]) -> str:
-    """Determine the GitHub review event based on findings.
+    """Determine the GitHub review event based on the merge-gate verdict.
+
+    Decoupled from severity. The merge-gate is the single source of truth
+    for "must fix before merging". Severity remains the reviewer's badness
+    label and drives sorting/display, not the event.
 
     Returns: APPROVE | COMMENT | REQUEST_CHANGES
     """
-    severities = {f.severity for f in findings}
-
-    if "critical" in severities:
+    if any(f.blocking for f in findings):
         return "REQUEST_CHANGES"
-    if "important" in severities:
-        return "COMMENT"
     if findings:
-        return "APPROVE"  # Only suggestions/nitpicks → approve with comments
-    return "APPROVE"  # Clean → approve
+        return "COMMENT"  # Advisory-only findings: surface, but don't gate merge.
+    return "APPROVE"
 
 
 def deduplicate_exact(findings: list[ReviewFinding]) -> list[ReviewFinding]:

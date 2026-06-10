@@ -122,6 +122,18 @@ class CommentConfig(BaseModel):
     include_confidence: bool = True  # Show confidence score
     suggestion_mode: str = "comment"  # comment | code
 
+    # Parallel `.ai()` polish pass: rewrites each comment body to be more
+    # concise and developer-focused right before posting. On any per-call
+    # failure, the original body is kept.
+    polish_enabled: bool = True
+
+    # Parallel `.ai()` merge-gate pass: classifies each finding as blocking
+    # vs non-blocking using a tight release-manager bar (build/security/data
+    # loss/contract break/regression only). Findings that don't meet the bar
+    # stay as advisory inline comments and never trigger REQUEST_CHANGES.
+    # Default ON for production noise reduction. Failures default to advisory.
+    merge_gate_enabled: bool = True
+
     severity_emojis: dict[str, str] = Field(
         default_factory=lambda: {
             "critical": "🔴",
@@ -273,7 +285,10 @@ class AIIntegrationConfig(BaseModel):
         default_factory=lambda: os.getenv("PR_AF_MODEL", "minimax/minimax-m2.5")
     )
     ai_model: str = Field(
-        default_factory=lambda: os.getenv("PR_AF_MODEL", "minimax/minimax-m2.5")
+        default_factory=lambda: os.getenv(
+            "PR_AF_AI_MODEL",
+            os.getenv("PR_AF_MODEL", "minimax/minimax-m2.5"),
+        )
     )
     max_turns: int = Field(default_factory=lambda: int(os.getenv("PR_AF_MAX_TURNS", "50")))
     max_retries: int = Field(default_factory=lambda: int(os.getenv("PR_AF_AI_MAX_RETRIES", "3")))

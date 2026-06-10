@@ -9,7 +9,10 @@ Maps to the validation contract for ``_resolve_budget_caps``:
 
 from __future__ import annotations
 
-import pytest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
 
 from pr_af.app import _resolve_budget_caps
 

@@ -27,6 +27,7 @@ from .hitl import (
     build_hax_client_from_env,
     request_review_approval,
 )
+from .merge_gate import classify_findings
 from .reasoners.harnesses import (
     adversary_phase,
     anatomy_phase,
@@ -268,6 +269,8 @@ class ReviewOrchestrator:
         print("[PR-AF] Phase 7: SYNTHESIS", flush=True)
         scored_findings = self._synthesize(all_findings, adversary_results)
         print(f"[PR-AF] Synthesis complete: {len(scored_findings)} scored findings", flush=True)
+        if self.config.comments.merge_gate_enabled:
+            scored_findings = await classify_findings(self.app, scored_findings)
         return plan, scored_findings
 
     async def _finish(
@@ -1009,6 +1012,30 @@ class ReviewOrchestrator:
         )
 
         comments = comments[: self.config.comments.max_comments]
+        if self.config.comments.polish_enabled and comments:
+            from .polish import polish_comments
+
+            comments = await polish_comments(self.app, comments)
+
+        findings_by_location = {
+            (
+                self._normalize_path(f.file_path),
+                f.line_start,
+                f.diff_side,
+            ): f
+            for f in filtered_for_comments
+        }
+        comments = [
+            comment.model_copy(
+                update={
+                    "body": self._decorate_with_blocking(
+                        findings_by_location.get((comment.path, comment.line, comment.side)),
+                        comment.body,
+                    )
+                }
+            )
+            for comment in comments
+        ]
         review_event = determine_review_event(filtered_for_comments)
 
         summary_body = self._format_summary(
@@ -1074,6 +1101,8 @@ class ReviewOrchestrator:
         summary = ReviewSummary(
             total_findings=len(scored_findings),
             by_severity=by_severity,
+            blocking_count=sum(1 for finding in scored_findings if finding.blocking),
+            advisory_count=sum(1 for finding in scored_findings if not finding.blocking),
             dimensions_run=len(plan.dimensions),
             cross_ref_interactions=self.cross_ref_count,
             adversary_challenged=self.adversary_challenged_count,
@@ -1454,18 +1483,35 @@ class ReviewOrchestrator:
             )
         return dimensions
 
+    def _decorate_with_blocking(self, finding: ScoredFinding | None, body: str) -> str:
+        """Wrap a comment in a GitHub-native merge-gate callout."""
+
+        if finding and finding.blocking:
+            header = "> [!CAUTION]\n> **Must-fix before merge.**"
+            if finding.blocking_reason:
+                header += f" {finding.blocking_reason}"
+        else:
+            header = "> [!NOTE]\n> **Advisory — non-blocking.** Safe to merge and address in a follow-up."
+            if finding and finding.blocking_reason:
+                header += f"\n>\n> _Why non-blocking:_ {finding.blocking_reason}"
+        return f"{header}\n\n{body}"
+
     def _format_comment_body(self, finding: ScoredFinding) -> str:
         emoji = self.config.comments.severity_emojis.get(finding.severity, "")
         severity_label = finding.severity.upper()
-        lines = [f"{emoji} **[{severity_label}] {finding.title}**", ""]
-
-        lines.append(finding.body)
+        lines = [
+            f"**{finding.title}**",
+            "",
+            f"<sub>{emoji} `{severity_label}` · confidence {int(finding.confidence * 100)}%</sub>",
+            "",
+            finding.body.strip(),
+        ]
 
         if finding.evidence:
-            lines.extend(["", "---", ""])
-            evidence_lines = finding.evidence.strip().splitlines()
-            for ev_line in evidence_lines:
+            lines.extend(["", "<details><summary>Evidence</summary>", ""])
+            for ev_line in finding.evidence.strip().splitlines():
                 lines.append(f"> {ev_line}")
+            lines.extend(["", "</details>"])
 
         if self.config.comments.include_suggestions and finding.suggestion:
             suggestion_text = finding.suggestion.strip()
@@ -1538,16 +1584,36 @@ class ReviewOrchestrator:
         emojis = self.config.comments.severity_emojis
         duration = round(time.monotonic() - self.started_at, 1)
 
-        rating = self._compute_rating(by_severity, len(findings))
+        blocking_count = sum(1 for f in findings if f.blocking)
+        advisory_count = len(findings) - blocking_count
+        rating = self._compute_rating_v2(blocking_count, advisory_count, len(findings))
+
+        if blocking_count == 0 and advisory_count == 0:
+            verdict_line = "> ✅ **Safe to merge.** No findings from automated review."
+        elif blocking_count == 0:
+            verdict_line = (
+                f"> ✅ **Safe to merge.** {advisory_count} advisory note"
+                f"{'s' if advisory_count != 1 else ''} below — non-blocking, "
+                "safe to address in a follow-up."
+            )
+        else:
+            verdict_line = (
+                f"> 🚫 **Merge blocked.** {blocking_count} must-fix issue"
+                f"{'s' if blocking_count != 1 else ''} found by automated review."
+            )
 
         lines: list[str] = [
             f"## {rating['emoji']} PR-AF Review — **{rating['label']}**",
+            "",
+            verdict_line,
             "",
             "*Automated multi-agent code review · "
             "[PR-AF](https://github.com/Agent-Field/pr-af) built with "
             "[AgentField](https://github.com/Agent-Field/agentfield)*",
             "",
             f"> **{len(findings)} findings** · "
+            f"🚫 {sum(1 for f in findings if f.blocking)} blocking · "
+            f"💬 {sum(1 for f in findings if not f.blocking)} advisory · "
             f"{emojis.get('critical', '')} {by_severity.get('critical', 0)} critical · "
             f"{emojis.get('important', '')} {by_severity.get('important', 0)} important · "
             f"{emojis.get('suggestion', '')} {by_severity.get('suggestion', 0)} suggestions · "
@@ -1613,12 +1679,14 @@ class ReviewOrchestrator:
 
         return "\n".join(lines)
 
-    def _compute_rating(self, by_severity: dict[str, int], total: int) -> dict[str, str]:
+    def _compute_rating(self, by_severity: dict[str, int], total: int, blocking_count: int = 0) -> dict[str, str]:
         critical = by_severity.get("critical", 0)
         important = by_severity.get("important", 0)
 
         if total == 0:
             return {"emoji": "🟢", "label": "Looks Good", "grade": "A"}
+        if blocking_count == 0:
+            return {"emoji": "🟢", "label": "Advisory Findings Only", "grade": "A-"}
         if critical >= 3:
             return {"emoji": "🔴", "label": "Needs Major Rework", "grade": "D"}
         if critical >= 1:
@@ -1631,6 +1699,21 @@ class ReviewOrchestrator:
             return {"emoji": "🟡", "label": "Mostly Good", "grade": "B+"}
         return {"emoji": "🟢", "label": "Looks Good — Minor Suggestions", "grade": "A-"}
 
+    def _compute_rating_v2(self, blocking: int, advisory: int, total: int) -> dict[str, str]:
+        """Blocking-driven rating; severity is secondary display context."""
+
+        if total == 0:
+            return {"emoji": "🟢", "label": "Looks Good", "grade": "A"}
+        if blocking >= 3:
+            return {"emoji": "🔴", "label": "Multiple Merge-Blockers", "grade": "D"}
+        if blocking >= 1:
+            return {"emoji": "🔴", "label": "Merge Blocked — Must-Fix Found", "grade": "C"}
+        if advisory >= 10:
+            return {"emoji": "🟢", "label": "Safe to Merge — Many Advisories", "grade": "B"}
+        if advisory >= 3:
+            return {"emoji": "🟢", "label": "Safe to Merge — Advisories Only", "grade": "B+"}
+        return {"emoji": "🟢", "label": "Safe to Merge — Minor Advisories", "grade": "A-"}
+
     def _build_key_findings(self, findings: list[ScoredFinding]) -> list[str]:
         if not findings:
             return ["**No issues found.** This PR looks clean across all review dimensions.", ""]
@@ -1640,8 +1723,8 @@ class ReviewOrchestrator:
         for f in findings:
             by_sev.setdefault(f.severity, []).append(f)
 
-        blocking = by_sev.get("critical", []) + by_sev.get("important", [])
-        non_blocking = by_sev.get("suggestion", []) + by_sev.get("nitpick", [])
+        blocking = [f for f in findings if f.blocking]
+        non_blocking = [f for f in findings if not f.blocking]
 
         lines.append("### Key Findings")
         lines.append("")
@@ -1652,13 +1735,14 @@ class ReviewOrchestrator:
             for f in blocking[:8]:
                 emoji = self.config.comments.severity_emojis.get(f.severity, "")
                 path_ref = f" (`{self._normalize_path(f.file_path)}:{f.line_start}`)" if f.file_path else ""
-                lines.append(f"- {emoji} **{f.title}**{path_ref} — {self._first_sentence(f.body)}")
+                reason = f" Gate: {f.blocking_reason}" if f.blocking_reason else ""
+                lines.append(f"- {emoji} **{f.title}**{path_ref} — {self._first_sentence(f.body)}{reason}")
             if len(blocking) > 8:
                 lines.append(f"- … and {len(blocking) - 8} more (see All Findings by Severity)")
             lines.append("")
 
         if non_blocking:
-            lines.append(f"**{len(non_blocking)} suggestion(s) and style note(s):**")
+            lines.append(f"**{len(non_blocking)} advisory finding(s) surfaced as non-blocking:**")
             lines.append("")
             for f in non_blocking[:5]:
                 emoji = self.config.comments.severity_emojis.get(f.severity, "")
@@ -1676,6 +1760,14 @@ class ReviewOrchestrator:
             lines.append("")
 
         return lines
+
+    def _loc(self, f: ScoredFinding) -> str:
+        if not f.file_path:
+            return "—"
+        norm = self._normalize_path(f.file_path)
+        if f.line_start > 0:
+            return f"`{norm}:{f.line_start}`"
+        return f"`{norm}`"
 
     def _build_review_details(self, findings: list[ScoredFinding], plan: ReviewPlan | None) -> list[str]:
         lines: list[str] = []
